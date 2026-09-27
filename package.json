@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-talk-to-bb",
-  "version": "0.2.3",
+  "version": "0.2.4-colton.0",
   "type": "module",
   "engines": {
     "bb": ">=0.43",
@@ -62,6 +62,6 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ChaningJang/bb-plugin-talk-to-bb.git"
+    "url": "https://github.com/colton-jang/bb-plugin-talk-to-bb.git"
   }
 }

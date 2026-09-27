@@ -80,6 +80,10 @@ const notePrefix = reviewId => `review-note:${reviewId}:`;
 const gateKey = reviewId => `review-gate:${reviewId}`;
 const dedupeKey = (text, anchor) => `${normalizeRequest(text)}|${normalizeRequest(anchor || '')}`;
 
+// A state is "already reported" per request, not per thread: a second question to the same thread
+// in one call has its own answer. Announcements without a receipt id keep the per-thread mark.
+const reportMark = (item) => (item.receiptId ? `${item.state}@${item.receiptId}` : item.state);
+
 /**
  * Batches worker-thread notifications. Suppresses a repeat of an already-reported state so an
  * awaited result is announced once rather than re-announced every time the thread ticks.
@@ -97,9 +101,9 @@ export class NotificationGate {
     const { threadId, title, state, at = new Date(this.clock()).toISOString() } = announcement;
     // Spread the caller's announcement so a drained batch keeps its snippet and assignment.
     const item = { ...announcement, threadId, title: title || threadId, state, at };
-    if (this.reported.get(threadId) === state) return { speak: false, held: false, suppressed: true, heldCount: this.queue.size };
+    if (this.reported.get(threadId) === reportMark(item)) return { speak: false, held: false, suppressed: true, heldCount: this.queue.size };
     if (this.policy === 'immediate' || this.awaited.has(threadId)) {
-      this.reported.set(threadId, state); this.queue.delete(threadId);
+      this.reported.set(threadId, reportMark(item)); this.queue.delete(threadId);
       return { speak: true, held: false, suppressed: false, heldCount: this.queue.size, item };
     }
     this.queue.set(threadId, { ...item, repeats: (this.queue.get(threadId)?.repeats ?? 0) + 1 });
@@ -114,7 +118,7 @@ export class NotificationGate {
     for (const threadId of snapshot.awaited ?? []) this.awaited.add(threadId);
     for (const item of snapshot.queue ?? []) {
       // One entry per thread, latest wins, and never one whose state was already announced.
-      if (!item?.threadId || this.reported.get(item.threadId) === item.state) continue;
+      if (!item?.threadId || this.reported.get(item.threadId) === reportMark(item)) continue;
       const seen = this.queue.get(item.threadId);
       if (seen && String(seen.at) >= String(item.at)) continue;
       this.queue.set(item.threadId, { ...item, restored: true });
@@ -125,7 +129,7 @@ export class NotificationGate {
   drain(reason = 'requested') {
     const items = [...this.queue.values()].sort((a, b) => a.at.localeCompare(b.at));
     this.queue.clear();
-    for (const item of items) this.reported.set(item.threadId, item.state);
+    for (const item of items) this.reported.set(item.threadId, reportMark(item));
     return { reason, items, text: items.length ? summarizeUpdates(items) : null };
   }
   /** Release on a conversational gap, only under the pause policy. */

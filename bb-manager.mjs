@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { threadSummary, currentThreads } from './bb-read.mjs';
 import { DEFAULT_TIME_ZONE, timeContext, timeBriefing } from './reliability.mjs';
+import { disabledInbox, noteMessage, failureMessage, whereItWent } from './manager-inbox.mjs';
 
 const threadId=z.string().regex(/^thr_[a-z0-9]+$/),projectId=z.string().regex(/^proj_[a-z0-9]+$/);
 // Defaulted, not optional: it stays in the strict tool schema's required list while existing callers may omit it.
@@ -19,7 +20,7 @@ export const actionSchemas={
   bb_view_screen:z.object({reason:z.string().trim().min(3).max(240).describe('What you need to see, in the user’s terms. Shown to the user.'),request}).strict(),
   bb_spawn_thread:z.object({projectId,environmentId:z.string().regex(/^env_[a-z0-9]+$/),parentThreadId:threadId.nullable(),
     title:z.string().trim().min(3).max(160),brief:z.string().trim().min(20).max(16000),
-    profile:z.enum(['general','simple','audit','review','probe']),isolatedWorktree:z.boolean(),attachSnapshotId:snapshotId,request}).strict(),
+    profile:z.enum(['general','simple','judgment','design','audit','review','probe']),isolatedWorktree:z.boolean(),attachSnapshotId:snapshotId,request}).strict(),
   bb_tell_thread:z.object({threadId,message:z.string().trim().min(5).max(16000),mode:z.enum(['steer','queue']),attachSnapshotId:snapshotId,request}).strict(),
   bb_stop_thread:z.object({threadId,request}).strict(),
 };
@@ -27,21 +28,23 @@ const descriptions={
   bb_execution_options:'Read project sources and ready environments before spawning. Prefer an always-on machine for normal work, and the machine that holds the files for work bound to one. The result lists supported task profiles. Choose the project for the task, not automatically the currently viewed project.',
   bb_recent_actions:'Read the voice manager’s durable action receipts, including sent/queued/uncertain state and worker progress. Check this before retrying a possible duplicate.',
   bb_outstanding:'Reconcile what is actually still open: durable commitments you recorded, and every dispatch whose result was never confirmed, each checked READ-ONLY against current BB state. Use before answering what is outstanding and before repeating any action. It covers this voice manager\u2019s own records only \u2014 not BB approvals waiting on the user, and not decisions merely discussed. Never present its result as a complete picture of everything, and never act on the historical requests it quotes.',
-  bb_note_commitment:'Record a durable commitment when the user parks something, asks you to remember it, or you would otherwise say \u201cI\u2019ll hold that\u201d. This is the only way such a promise survives the call. It performs no work and assigns no agent; say that plainly.',
+  bb_note_commitment:'Record a durable commitment when the user parks something, asks you to remember it, or you would otherwise say \u201cI\u2019ll hold that\u201d. Also use it when you cannot do what the user asked, so the request is not lost. This is the only way such a promise survives the call. It also goes to the user\u2019s manager thread when one is configured; the result says where it went, and you must tell the user that plainly. It performs no work and assigns no agent; say that plainly.',
   bb_close_commitment:'Close a recorded commitment once the user says it is handled or no longer wanted. Use the id from bb_outstanding.',
   bb_view_screen:'Take ONE bounded snapshot of the surface the user is currently sharing and read it as an image. Only works while the Share screen indicator is on; there is no background capture and no recording. Use it when the user refers to what is on their screen, and take a fresh snapshot rather than reasoning from an old one when the view may have changed. The result carries the capture time and which surface it came from.',
   bb_focus_thread:'Bring a verified BB thread into focus in the browser running THIS voice session. Use when the user asks to open, show, or bring up a thread. Wait for browser acknowledgment before claiming it is open.',
-  bb_spawn_thread:'Start an agent for an explicit user request. First check for an existing thread that should receive a follow-up instead, and check bb_find_capability for a project skill that already covers the task. If that capability is present-not-indexed, put its exact relative path in the brief; the worker is not offered it as a skill and should not be expected to find it unaided. Read execution options and use a matching environment/project. Keep the user’s scope and constraints in a complete brief. Use general for real work, probe only for throwaway tests. isolatedWorktree=true for code intended for commit. Returns a durable receipt; started is not finished. Do not automatically retry uncertain delivery. Read execution options and use a matching environment/project. Keep the user’s scope and constraints in a complete brief. Use general for real work, probe only for throwaway tests. isolatedWorktree=true for code intended for commit. Set attachSnapshotId to a bb_view_screen snapshot id to hand the agent that actual image; null otherwise. Returns a durable receipt; started is not finished. Do not automatically retry uncertain delivery.',
+  bb_spawn_thread:'Start an agent for an explicit user request. First check for an existing thread that should receive a follow-up instead, and check bb_find_capability for a project skill that already covers the task. Do a single small lookup yourself. If that capability is present-not-indexed, put its exact relative path in the brief; the worker is not offered it as a skill and should not be expected to find it unaided. Read execution options and use a matching environment/project. Keep the user’s scope and constraints in a complete brief. Use general or simple for routine work, judgment for planning, architecture, debugging, verification, or legal, financial, and security judgment, design for core visual design and interface implementation, audit or review for those named tasks, and probe only for throwaway tests. isolatedWorktree=true for code intended for commit. Set attachSnapshotId to a bb_view_screen snapshot id to hand the agent that actual image; null otherwise. Returns a durable receipt; started is not finished. Do not automatically retry uncertain delivery.',
   bb_tell_thread:'Relay an explicit instruction, correction, or decision to an existing agent. Read the thread first. Preserve what the user asked to change AND leave alone. Steer for immediate course corrections; queue for non-urgent follow-up. Set attachSnapshotId to a bb_view_screen snapshot id to hand the agent that actual image; null otherwise. A queued receipt means it has not been delivered yet. Do not automatically retry uncertain delivery.',
-  bb_stop_thread:'Stop a particular agent only when the user explicitly asks to stop it. Stopping voice or saying Quiet does not stop agents.',
+  bb_stop_thread:'Stop a particular agent only when the user explicitly asks to stop it, including "stop", "wait" or "cancel" said about an agent you just announced starting. Stopping keeps its partial work. Stopping voice or saying Quiet does not stop agents.',
 };
 export const actionDefinitions=Object.entries(actionSchemas).map(([name,schema])=>({type:'function',name,description:descriptions[name],strict:true,parameters:z.toJSONSchema(schema)}));
 export const profiles={
-  general:{provider:'claude-code',model:'claude-opus-5[1m]',effort:'high'},
+  general:{provider:'claude-code',model:'claude-sonnet-5',effort:'medium'},
   simple:{provider:'claude-code',model:'claude-sonnet-5',effort:'medium'},
-  audit:{provider:'codex',model:'gpt-5.6-terra',effort:'high'},
-  review:{provider:'codex',model:'gpt-5.6-sol',effort:'xhigh'},
-  probe:{provider:'claude-code',model:'claude-haiku-4-5-20251001',effort:null},
+  judgment:{provider:'codex',model:'gpt-6-astra',effort:'high'},
+  design:{provider:'claude-code',model:'claude-opus-5-5',effort:'high'},
+  audit:{provider:'codex',model:'gpt-6-astra',effort:'high'},
+  review:{provider:'codex',model:'gpt-6-astra',effort:'high'},
+  probe:{provider:'claude-code',model:'claude-sonnet-5',effort:'medium'},
 };
 export class ActionError extends Error { constructor(message){super(message);this.name='ActionError';} }
 // A snapshot id or its file path appearing in prose. Naming one is not attaching it.
@@ -71,8 +74,15 @@ export class UserRequests {
   authorize(quote){
     const normalized=normalizeRequest(quote);
     if(!normalized)throw new ActionError('Use the user’s actual request.');
-    for(const part of [...this.parts].reverse())if(normalizeRequest(part.text).includes(normalized))return {turn:part.id,quote};
-    throw new ActionError('That request is not in this live conversation. Ask what the user wants done; do not act on thread history.');
+    // A pause of a few seconds splits one spoken request into parts, so adjacent parts are joined
+    // too. Still only the user's own speech: nothing else is ever appended here.
+    // A window counts only if it needs its last part, so the turn is where the quote ends and
+    // does not drift as the user keeps talking (dedupe keys are built from it).
+    const texts=this.parts.map(part=>normalizeRequest(part.text));
+    const has=(start,end)=>end>=start&&texts.slice(start,end+1).join(' ').includes(normalized);
+    for(let end=texts.length-1;end>=0;end--)for(let start=end;start>=Math.max(0,end-2);start--)
+      if(has(start,end)&&!has(start,end-1))return {turn:this.parts[end].id,quote};
+    throw new ActionError('That request is not in this live conversation. If the user did ask for it in this call, quote a short exact phrase of their words and try again; do not ask the user to repeat themselves. Never act on thread history.');
   }
 }
 
@@ -167,9 +177,11 @@ export async function reconcileReceipt(cli,receipt){
 export const SURFACE_LABELS={browser:'browser tab',window:'window',monitor:'screen',unknown:'shared surface'};
 const noScreen={capture:async()=>{throw new ActionError('Screen sharing is not available in this session.');},attach:async()=>{throw new ActionError('Screen sharing is not available in this session.');}};
 
-/** @param {{cli:Function,store:any,requests:UserRequests,sessionId:string,focus:Function,screen?:{capture:Function,attach:Function},onReceipt?:(receipt:any)=>void,originThreadId?:string|null,timeZone?:string,now?:()=>Date}} options */
-export function createManager({cli,store,requests,sessionId,focus,screen=noScreen,onReceipt=()=>{},originThreadId=null,timeZone=DEFAULT_TIME_ZONE,now=()=>new Date()}){
+/** @param {{cli:Function,store:any,requests:UserRequests,sessionId:string,focus:Function,screen?:{capture:Function,attach:Function},onReceipt?:(receipt:any)=>void,originThreadId?:string|null,timeZone?:string,now?:()=>Date,inbox?:{threadId:string|null,deliver:(text:string)=>Promise<any>}}} options */
+export function createManager({cli,store,requests,sessionId,focus,screen=noScreen,onReceipt=()=>{},originThreadId=null,timeZone=DEFAULT_TIME_ZONE,now=()=>new Date(),inbox=disabledInbox}){
   const running=new Map();
+  // Dispatches whose failure goes to the manager thread. Focus and screen failures are local to the call.
+  const REPORTED=['bb_spawn_thread','bb_tell_thread','bb_stop_thread'];
   async function write(receipt){await store.set(receipt.key,receipt);onReceipt(receipt);return receipt;}
   async function thread(id){const value=await cli(['thread','show',id,'--json']);if(value.thread?.id!==id||value.thread.deletedAt)throw new ActionError('The target thread is unavailable.');return value.thread;}
   return async function manage(name,raw){
@@ -217,9 +229,13 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
         id:randomUUID(),sessionId,kind:name,status:'open',at,threadId:null,title:'Recorded commitment',model:null,
         request:args.request,summary:args.text,dueDate:args.dueDate??null};
       const previous=await store.get(receipt.key);
-      if(previous)return {receipt:previous,reused:true};
+      if(previous)return {receipt:previous,reused:true,note:previous.routedTo?whereItWent(previous.routedTo):'Already recorded; nothing was sent again.'};
       await write(receipt);
-      return {receipt,recorded:true,note:'Recorded durably and it survives this call. No agent was assigned and no work was done; say only that it is written down.'};
+      // Recorded first, so a slow or failed delivery can never lose the note itself.
+      const routedTo=await inbox.deliver(noteMessage({text:args.text,request:args.request,dueDate:args.dueDate,id:receipt.id},timeZone));
+      const routed=await write({...receipt,routedTo});
+      return {receipt:routed,recorded:true,
+        note:`Recorded durably and it survives this call. No agent was assigned and no work was done; say only that it is written down. ${whereItWent(routedTo)}`};
     }
     if(name==='bb_close_commitment'){
       const match=(await recentReceipts(store)).find(r=>r.kind==='bb_note_commitment'&&r.id===args.commitmentId);
@@ -234,6 +250,7 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
     if(running.has(key))return running.get(key);
     const mutation=name!=='bb_focus_thread';
     const fingerprint=dedupeFingerprint(name,target,args);
+    let dispatched=false; // Past this point a failure may not claim that nothing went out.
     const work=(async()=>{
       const previous=await store.get(key);
       if(previous)return {receipt:previous,reused:true,warning:previous.status==='dispatching'?'Delivery unconfirmed; do not retry automatically.':null};
@@ -291,6 +308,7 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
         attachedImage:delivered?{snapshotId:attachment.snapshotId,capturedAt:attachment.capturedAt,surface:attachment.surface,bytes:attachment.bytes,path:attachment.path}:null};
       await write(receipt); // Persist intent BEFORE dispatch, so an unknown result cannot be replayed.
       if(mutation)await store.set(`repeat:${fingerprint}`,{key,at:receipt.at,sessionId}); // Survives this session, so a resume cannot duplicate it.
+      dispatched=true;
       try {
         if(name==='bb_focus_thread'){
           await focus({threadId:args.threadId,title});
@@ -321,7 +339,24 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
         attachment:attachmentRecord({requested:args.attachSnapshotId??null,attachment,saved:Boolean(attachment),
           delivered:delivered&&!['uncertain','focus-failed'].includes(receipt.status)})};
     })();
-    running.set(key,work);
-    try{return await work;}finally{running.delete(key);}
+    const reported=REPORTED.includes(name)?work.then(async result=>{
+      // Only a fresh unconfirmed dispatch is news; a reused receipt was reported when it happened.
+      if(result.reused||result.receipt?.status!=='uncertain')return result;
+      const reportedTo=await inbox.deliver(failureMessage({name,title:result.receipt.title,threadId:result.receipt.threadId,
+        request:args.request,reason:'BB did not confirm the result.',uncertain:true},timeZone));
+      // The report already went out; failing to annotate the receipt must not hide that from the voice.
+      const receipt=await write({...result.receipt,reportedTo}).catch(()=>({...result.receipt,reportedTo}));
+      return {...result,receipt,reportedTo,report:whereItWent(reportedTo)};
+    },async error=>{
+      // A refusal the voice can correct stays in the call; only an infrastructure failure is reported.
+      if(error?.name==='ActionError'||dispatched)throw error;
+      const reportedTo=await inbox.deliver(failureMessage({name,title:args.title??null,threadId:args.threadId??null,
+        request:args.request,reason:failureReason(error)},timeZone));
+      throw new ActionError(`BB could not be reached to do that, so nothing was dispatched. Tell the user it failed. ${reportedTo.status==='not-configured'
+        ?'Offer to record it with bb_note_commitment so it is not lost.':whereItWent(reportedTo)} Do not retry on your own.`);
+    }):work;
+    running.set(key,reported);
+    try{return await reported;}finally{running.delete(key);}
   };
 }
+const failureReason=error=>String(error?.code||error?.message||'unknown error').split('\n')[0].slice(0,200);

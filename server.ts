@@ -8,10 +8,11 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { createReader, createCli } from './bb-read.mjs';
 import { createManager, actionSchemas, recentReceipts, ActionError, SURFACE_LABELS } from './bb-manager.mjs';
+import { createInbox } from './manager-inbox.mjs';
 import { ShareState, SnapshotStore, FrameInbox, describeSnapshot, MAX_BODY_BYTES } from './screen-store.mjs';
 import { createReviewManager, reviewSchemas, NotificationGate, resumableReview, ReviewNotes } from './review-notes.mjs';
 import { TalkSession } from './live-session.mjs';
-import { createWorkerEventHandler, WORKER_EVENTS } from './worker-events.mjs';
+import { createWorkerEventHandler, WORKER_EVENTS, collectEvents } from './worker-events.mjs';
 import { setProfile } from './profile.mjs';
 import { DEFAULT_TIME_ZONE, buildContinuity, saveContinuity, loadContinuity, resumeBriefing, resumeSummary, openReviewFor } from './reliability.mjs';
 import worklet from './audio-source.mjs';
@@ -32,6 +33,7 @@ export default function plugin(bb: BbPluginApi) {
     cliPath: {type:'string',label:'BB CLI executable on the BB server',default:process.env.BB_CLI || 'bb'},
     timeZone: {type:'string',label:'Time zone for resolving spoken dates',default:Intl.DateTimeFormat().resolvedOptions().timeZone||DEFAULT_TIME_ZONE},
     snapshotDirectory: {type:'string',label:'Where authorized screen snapshots are written on the BB server',default:join(homedir(),'.bb','talk-to-bb','snapshots')},
+    managerThreadId: {type:'string',label:'Thread that receives notes voice records and requests it could not complete (a thr_ id; blank keeps them only in Talk to BB)',default:''},
   });
   const captureFailures: Record<string,string> = {
     'not-sharing':'The user is not sharing a screen right now, so there is nothing to look at. Ask them to press Share screen in the Talk to BB panel.',
@@ -120,13 +122,17 @@ export default function plugin(bb: BbPluginApi) {
             snapshots=new SnapshotStore({directory:join(s.snapshotDirectory,sessionId.slice(-12))});
 
             let manager:ReturnType<typeof createManager>;
-            session=new TalkSession({key:apiKey,context:parsed.data,timeZone:s.timeZone||DEFAULT_TIME_ZONE,query:(name:string,args:any)=>{
+            session=new TalkSession({key:apiKey,sessionId,context:parsed.data,timeZone:s.timeZone||DEFAULT_TIME_ZONE,query:(name:string,args:any)=>{
               if(Object.hasOwn(reviewSchemas,name)){if(!review)throw new Error('Review mode is not available yet.');return review(name,args);}
               // Review mode blocks agent actions until the user explicitly hands the notes off.
               if(Object.hasOwn(actionSchemas,name)){review?.guard(name,args);return manager(name,args);}
               return query(name,args,session?.controller.signal);
             }});
-            manager=createManager({cli:actionCli,store:bb.storage.kv,requests:session.userRequests,sessionId,originThreadId:parsed.data.threadId,timeZone:s.timeZone||DEFAULT_TIME_ZONE,
+            // The SDK path is the fallback for when the CLI itself cannot run.
+            // A short CLI timeout, so a hanging CLI falls through to the SDK while the user is still listening.
+            const inbox=createInbox({threadId:s.managerThreadId,cli:createCli({cliPath:s.cliPath,serverUrl:bb.server.loopbackBaseUrl,timeout:10000}),
+              send:(args:any)=>bb.sdk.threads.send(args)});
+            manager=createManager({cli:actionCli,store:bb.storage.kv,requests:session.userRequests,sessionId,originThreadId:parsed.data.threadId,timeZone:s.timeZone||DEFAULT_TIME_ZONE,inbox,
               focus:({threadId,title}:{threadId:string;title:string})=>new Promise<void>((resolve,reject)=>{
                 if(closed){reject(new Error('Browser disconnected'));return;}
                 const id=randomUUID();
@@ -203,7 +209,7 @@ export default function plugin(bb: BbPluginApi) {
             session.on('transcript',()=>review?.gate.markActivity());
             send('actions',{receipts:previousReceipts});
             session.on('audio',(bytes:Uint8Array)=>{if(socket.readyState===1)socket.send(bytes);});
-            for(const type of ['ready','transcript','playback','flush','fault','notice']) session.on(type,(value:object)=>send(type,value));
+            for(const type of ['ready','transcript','playback','flush','fault','notice','rate-limit','rate-limit-cleared']) session.on(type,(value:object)=>send(type,value));
             // Prior-session context is offered as history only; it never re-enters the authorized request log.
             session.on('ready',()=>{void (async()=>{
               try {
@@ -214,7 +220,9 @@ export default function plugin(bb: BbPluginApi) {
                 if(restored?.active&&!closed&&session){reviewing=true;session.reviewMode(true,{...restored,restoredFromPreviousSession:true});}
                 const previous=await loadContinuity(bb.storage.kv,{sessionId});
                 if(!previous||closed||!session)return;
-                if(session.resume(resumeBriefing({...previous,reviewRestored:Boolean(restored?.active)})))
+                // Null when nothing is open: the call starts clean instead of opening on old words.
+                const briefing=resumeBriefing({...previous,reviewRestored:Boolean(restored?.active)});
+                if(briefing&&session.resume(briefing))
                   send('resume',{summary:{...resumeSummary(previous),reviewRestored:Boolean(restored?.active)}});
               } catch {/* a missing continuity record must never block a call */}
             })();});
@@ -285,7 +293,14 @@ export default function plugin(bb: BbPluginApi) {
   // Worker state survives the call. The dispatcher lives in worker-events.mjs so the same
   // code a test drives is the code the host calls: one event updates the newest matching
   // receipt only, and delivery policy stays inside the session.
-  const onWorkerEvent=createWorkerEventHandler({store:bb.storage.kv,session:()=>active,publish:(receipt:any)=>publishReceipt?.(receipt)});
+  // Which turn answered a request from the live call is read from the thread's event log before
+  // it is read back (B19); the real follow-on turn started 5 s after the idle before it, so the
+  // window is 12 s. Thread reads use the SDK, not the CLI, which can hang.
+  const onWorkerEvent=createWorkerEventHandler({store:bb.storage.kv,session:()=>active,publish:(receipt:any)=>publishReceipt?.(receipt),
+    settleMs:12000,readThread:(threadId:string)=>bb.sdk.threads.get({threadId}) as Promise<any>,
+    listEvents:(threadId:string,since:number)=>collectEvents((beforeSeq?:string)=>
+      bb.sdk.threads.events.list({threadId,order:'desc',limit:'100',...(beforeSeq?{beforeSeq}:{})}) as Promise<any[]>,since)});
+  bb.onDispose(()=>onWorkerEvent.dispose());
   // Awaited, not fire-and-forget: the host's dispatch waits for the receipt write.
   for(const event of WORKER_EVENTS)bb.events.on(event as any,async(data:any)=>{await onWorkerEvent(event,data);});
   bb.onDispose(()=>{active?.close();});

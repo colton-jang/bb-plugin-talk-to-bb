@@ -11,12 +11,12 @@ const project = z.string().regex(/^proj_[a-z0-9]+$/).nullable();
 export const schemas = {
   bb_overview: z.object({}).strict(),
   bb_search: z.object({ query: z.string().trim().min(1).max(160) }).strict(),
-  bb_threads: z.object({ projectId: project, status: z.enum(['all', 'active', 'idle', 'error', 'waiting']), offset: z.number().int().min(0).max(10000) }).strict(),
-  bb_read_thread: z.object({ threadId: id, turns: z.number().int().min(1).max(12) }).strict(),
+  bb_threads: z.object({ projectId: project.default(null), status: z.enum(['all', 'active', 'idle', 'error', 'waiting']).default('all'), offset: z.number().int().min(0).max(10000).default(0) }).strict(),
+  bb_read_thread: z.object({ threadId: id, turns: z.number().int().min(1).max(12).default(5) }).strict(),
   bb_projects: z.object({}).strict(),
 };
 const descriptions = {
-  bb_overview: 'Read live BB counts, projects, and up to 60 current threads across ALL projects. Running and pending-interaction threads first. Idle does not mean finished. Use bb_read_thread for facts about work or blockers.',
+  bb_overview: 'Read live BB counts, projects, and up to 20 current threads across ALL projects. Running and pending-interaction threads first. Idle does not mean finished. Use bb_read_thread for facts about work or blockers.',
   bb_search: 'Search titles and conversation messages across BB, including archived threads. Returns matching snippets and IDs. Search is bounded; read matching threads before explaining their decisions.',
   bb_threads: 'Page through current, unarchived visible threads, optionally filtered by project or state. Waiting means a pending BB interaction, not all work that may need user judgment. Page size 40.',
   bb_read_thread: 'Read current metadata, pending interactions, queued messages, and the latest conversation turns for one thread. Explicitly reports omitted older history. Read multiple threads when comparing work.',
@@ -109,8 +109,8 @@ export function createReader(options) {
         cli(['thread','count','--by','project','--json']), projects(), cli(['thread','list','--json']),
       ]);
       const rows = currentThreads(listed);
-      data = { counts, projects: names, threads: rows.slice(0,60).map(threadSummary),
-        returned: Math.min(rows.length,60), more: rows.length > 60,
+      data = { counts, projects: names, threads: rows.slice(0,20).map(threadSummary),
+        returned: Math.min(rows.length,20), more: rows.length > 20,
         coverage: 'Current visible threads across all projects. Counts come from BB count. Listing may be bounded; use project filtering and search for missing work.' };
     }
     if (name === 'bb_threads') {
@@ -128,7 +128,7 @@ export function createReader(options) {
       const found = await cli(['thread','search',args.query,'--limit','8','--json']);
       data = Object.fromEntries(Object.entries(found).map(([group, result]) => [group, {
         total: result.total, results: (result.results || []).map(r => ({ thread: threadSummary(r.thread),
-          matches: (r.matches || []).slice(0,3).map(m => ({ sourceKind:m.sourceKind, text:m.text?.slice(0,1600), sourceSeq:m.sourceSeq })) })),
+          matches: (r.matches || []).slice(0,3).map(m => ({ sourceKind:m.sourceKind, text:m.text?.slice(0,800), sourceSeq:m.sourceSeq })) })),
       }]));
     }
     if (name === 'bb_read_thread') {
@@ -140,9 +140,9 @@ export function createReader(options) {
       ]);
       // Prefer recent content if a single large turn exceeds the context budget.
       data = { thread: threadSummary(state.thread), pendingTodos: state.pendingTodos,
-        conversation: conversation.slice(-24000), conversationTruncated: conversation.length > 24000,
+        conversation: conversation.slice(-10000), conversationTruncated: conversation.length > 10000,
         coverage: `Newest ${args.turns} user-message turns only; not complete history.`,
-        interactions: short(interactions,7000), queue: short(queue,5000) };
+        interactions: short(interactions,3000), queue: short(queue,2000) };
     }
     return { checkedAt: new Date().toISOString(), source: 'BB CLI', ...data };
   };

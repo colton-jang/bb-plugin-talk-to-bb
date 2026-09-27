@@ -115,6 +115,8 @@ function VoicePanel() {
         if(e.type==='review')setReview({...NO_REVIEW,...e.state});
         if(e.type==='action')setReceipts(old=>[e.receipt,...old.filter(r=>r.id!==e.receipt.id)].slice(0,30));
         if(e.type==='ready'){ready.current=true;clearTimeout(resources.current.timer);setPhase('live');setStatus('Listening across all your BB projects.');}
+        if(e.type==='rate-limit')setStatus(e.text||'OpenAI is temporarily limiting backend requests. Retrying shortly.');
+        if(e.type==='rate-limit-cleared')setStatus('Checking BB again…');
         if(e.type==='notice')setNotice(e.text||'');
         if(e.type==='resume')setCarry(e.summary||null);
         if(e.type==='transcript')append(e.speaker,e.text);

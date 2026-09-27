@@ -91,14 +91,13 @@ test('the real status RPC reports unconfigured without credentials and claims no
   void bb;
 });
 
-// Four workers contributed tools to one strict-mode function list. Nothing else checks the
-// whole list at once, and a single malformed schema breaks the live session for every tool.
-test('every tool the model is offered is a valid strict-mode function with a unique name',async()=>{
-  const {config}=await import('../live-session.mjs');
+// The compact entrypoint keeps the full operation catalog while keeping each
+// Responses request below a low per-minute token limit.
+test('the model receives one strict compact tool and can decode only known operations',async()=>{
+  const {config,decodeToolCall}=await import('../live-session.mjs');
   const tools=config({}).delegation.responses.tools;
-  assert.ok(tools.length>=26,`expected the merged tool list, got ${tools.length}`);
-  const names=tools.map(t=>t.name);
-  assert.deepEqual(names.filter((n,i)=>names.indexOf(n)!==i),[],'duplicate tool names');
+  assert.equal(tools.length,1);
+  assert.equal(tools[0].name,'bb_call');
   for (const tool of tools) {
     const where=`tool ${tool.name}`;
     assert.equal(tool.type,'function',where);
@@ -112,9 +111,11 @@ test('every tool the model is offered is a valid strict-mode function with a uni
     assert.deepEqual(properties.filter(k=>!required.includes(k)),[],
       `${where}: strict mode requires every property to be listed in required`);
   }
-  // The manager's action tools must all demand a quoted live request; a read tool must not.
-  for (const tool of tools.filter(t=>/^bb_(spawn|tell|stop|focus)_thread$|^bb_view_screen$/.test(t.name)))
-    assert.ok((tool.parameters.required??[]).includes('request'),`${tool.name} must require a quoted request`);
-  for (const tool of tools.filter(t=>/^bb_(overview|search|threads|read_thread|projects|capabilities|find_capability|read_capability)$/.test(t.name)))
-    assert.equal((tool.parameters.properties??{}).request,undefined,`${tool.name} is a read and must not take a request quote`);
+  const names=tools[0].parameters.properties.name.enum;
+  assert.ok(names.length>=26);
+  assert.equal(new Set(names).size,names.length);
+  for(const name of names)assert.match(config({}).delegation.responses.instructions,new RegExp(`${name}\\(`));
+  assert.deepEqual(decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_projects',args:'{}'})}),
+    {name:'bb_projects',args:{}});
+  assert.throws(()=>decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_delete_everything',args:'{}'})}),/Unknown BB operation/);
 });

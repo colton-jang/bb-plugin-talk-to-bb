@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createReader, currentThreads } from '../bb-read.mjs';
-import { TalkSession } from '../live-session.mjs';
+import { TalkSession, rateLimitDelay } from '../live-session.mjs';
 
 test('read tools reject mutation names, flags, invalid IDs and extra arguments before running a process',async()=>{
   let calls=0;const query=createReader({cliPath:'/bb',serverUrl:'http://127.0.0.1',run:async()=>{calls++;return {stdout:'[]'};}});
@@ -29,6 +29,19 @@ test('search preserves shell-like text as one literal argument without executing
   let seen;const query=createReader({cliPath:'/bb',serverUrl:'http://local',run:async(path,args,options)=>{seen={args,options};return {stdout:'{"active":{"total":0,"results":[]}}'};}});
   await query('bb_search',{query:'proposal $(touch /tmp/unwanted); echo nope'});
   assert.equal(seen.args[2],'proposal $(touch /tmp/unwanted); echo nope');assert.equal(seen.options.shell,false);
+});
+
+test('a compact thread read can omit the optional turn count',async()=>{
+  const query=createReader({cliPath:'/bb',serverUrl:'http://local',run:async(path,args)=>{
+    if(args[0]==='thread'&&args[1]==='show')return {stdout:JSON.stringify({thread:{id:'thr_a',projectId:'proj_a',status:'idle'}})};
+    if(args[0]==='thread'&&args[1]==='log'){
+      assert.equal(args[args.indexOf('--limit')+1],'5');
+      return {stdout:'Recent conversation'};
+    }
+    return {stdout:'[]'};
+  }});
+  const result=await query('bb_read_thread',{threadId:'thr_a'});
+  assert.equal(result.conversation,'Recent conversation');
 });
 
 function mock(query=async()=>({ok:true})) {
@@ -67,6 +80,21 @@ test('ending a session cancels lookups and ignores late results',async()=>{
   session.close();finish({ok:true});await tick();
   assert.equal(session.controller.signal.aborted,true);
   assert.equal(sent.filter(e=>e.type==='response.item.create'||e.type==='response.create').length,0);session.clear();
+});
+
+test('a rate-limited backend continuation waits and retries once without ending voice',async()=>{
+  const {session,sent}=mock();
+  session.send({type:'response.create'});
+  const first=sent[0].event_id;
+  let fault=false;
+  session.on('fault',()=>{fault=true;});
+  session.handle({type:'error',error:{code:'invalid_request_error',client_event_id:first,
+    message:'Rate limit reached for gpt-6-sol. Please try again in 0s.'}});
+  assert.equal(fault,false);
+  assert.equal(rateLimitDelay('unrelated failure'),null);
+  await new Promise(resolve=>setTimeout(resolve,1300));
+  assert.equal(sent.filter(event=>event.type==='response.create').length,2);
+  session.close();session.clear();
 });
 
 test('mute blocks late audio, resume persists, and invalid PCM is ignored',()=>{

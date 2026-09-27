@@ -12,14 +12,11 @@ Talk to BB needs an OpenAI API key with access to GPT-Live (OpenAI bills voice s
 You need bb 0.43 or newer.
 
 ```bash
-# straight from git
-bb plugin install git:https://github.com/ChaningJang/bb-plugin-talk-to-bb.git
-
 # from a folder (an unzipped release or a git clone)
 bb plugin install /path/to/bb-plugin-talk-to-bb
 
-# or from a marketplace that lists it
-bb plugin install talk-to-bb@<marketplace>
+# or install Colton's independent fork
+bb plugin install git:https://github.com/colton-jang/bb-plugin-talk-to-bb.git@main
 ```
 
 ## Set up
@@ -35,6 +32,9 @@ In bb → Settings → Plugins → Talk to BB (or `bb plugin config talk-to-bb s
 - **Extra worker rules** (`workerRules`): appended to every brief an agent receives, for your own tools and conventions
   (for example "leave a handoff note under handoffs/", or the rules for your email CLI). The built-in rules already say
   to draft rather than send email or messages, keep your exclusions, and report what actually changed.
+- **Manager thread** (`managerThreadId`): a `thr_` id. Every note the voice records, and every start, message or stop
+  it could not complete, is sent to this thread, and the voice says so. Successful actions send nothing. Without it,
+  notes stay inside Talk to BB (visible only through `bb_outstanding`).
 - `timeZone` (defaults to the server's zone), `cliPath` (defaults to the server's `bb`), `snapshotDirectory`.
 
 Then click the microphone in BB's sidebar footer.
@@ -94,13 +94,15 @@ Relative dates resolve in the user's own time zone (`timeZone` setting, default 
 
 Parked promises are recorded, not remembered. `bb_note_commitment` writes a durable commitment receipt and does no work; `bb_close_commitment` closes it. `bb_outstanding` reports recorded commitments plus every dispatch BB never confirmed, each reconciled read-only against current thread state — a spawn is reported as probably created or probably never started, never retried. It also states what it does not cover: BB approvals waiting on the user, work nobody assigned by voice, and decisions that were only discussed. Pending approvals and permission prompts stay with the user; there is no tool that answers one, and relaying an instruction to a blocked thread says so.
 
-One worker event updates one receipt — the newest dispatch for that thread — so an idle agent cannot mark every earlier assignment newly replied, and a repeated event does not re-announce itself. While replies are muted, worker news is held and delivered in a single batch on resume instead of interrupting dictation.
+One worker event updates one receipt — the newest dispatch for that thread — so an idle agent cannot mark every earlier assignment newly replied, and a repeated event does not re-announce itself. A receipt is answered once: a long-lived thread's later replies to other messages are tracked as activity but never replace the answer or get announced as it. When the answer is to something the user asked in the current call, the voice reads the thread and tells them the answer instead of offering to. While replies are muted, worker news is held and delivered in a single batch on resume instead of interrupting dictation.
 
-The twenty-minute cap is announced at five minutes and at one minute, with a prompt to say what should carry over. When a session ends, the last thing the user said, the open commitments, and the unconfirmed dispatches are written to a continuity record; the next session receives them as history, shown in the panel as "Carried over from your last session". That text is deliberately not added to the authorized-request log: an old sentence cannot authorize a tool call, and the user has to restate anything they still want done. The same action, target and wording inside six hours resolves to the original receipt even across a session boundary, so a resume cannot turn one instruction into two mutations.
+The twenty-minute cap is announced at five minutes and at one minute, with a prompt to say what should carry over. When a session ends, the last thing the user said, the open commitments, and the unconfirmed dispatches are written to a continuity record; the next session receives the open items as history (the last words only when the call was cut off at the cap), opening with a count built in code rather than any name from the record, and receives nothing at all when nothing is open, shown in the panel as "Carried over from your last session". That text is deliberately not added to the authorized-request log: an old sentence cannot authorize a tool call, and the user has to restate anything they still want done. The same action, target and wording inside six hours resolves to the original receipt even across a session boundary, so a resume cannot turn one instruction into two mutations.
 
-Profiles follow the BB manager defaults: Opus 5 high for general work, Sonnet 5 medium for simple work, Terra high for audits, Sol xhigh for reviews, and a hidden Haiku profile for harmless probes. Model availability and environment/project ownership are checked before dispatch.
+Profiles follow the configured model tiers: Sonnet 5 medium for general, simple, and probe work; GPT-6 Astra high for judgment, audits, and reviews; and Opus 5.5 high for core visual design. Model availability and environment/project ownership are checked before dispatch.
 
 Actions require a quote from the actual live microphone transcript or typed user message. Retrieved thread text cannot authorize actions. A durable receipt is recorded before dispatch, duplicate calls within the same request reuse it, and uncertain results are never automatically retried. The Actions section shows recent receipts and worker replies/failures/input requests. An agent reply is not proof that its task succeeded; the assistant must inspect the result. Focus waits for client selection acknowledgment, with a timeout and a link fallback.
+
+The voice model is `gpt-live-1` and the reasoning backend is `gpt-6-sol`. The backend exposes one compact `bb_call` tool and caps a response at 900 output tokens to reduce rate-limit pressure. If OpenAI rejects a continuation for the project’s per-minute token limit, the panel shows a bounded wait and the plugin retries it up to five times per session. This preserves the question, but the project’s limit still applies and multi-step requests may pause.
 
 ## Develop
 
@@ -110,11 +112,6 @@ npm test && npm run test:ui && npm run typecheck && bb plugin build
 bb plugin install . --yes
 ```
 
-The plugin uses BB's authenticated HTTP/WebSocket routes. No additional public server or port share is required. Audio uses the browser AudioWorklet and mono PCM16 at 16 kHz. Sessions end after 20 minutes. Voice is $0.05/min plus backend usage, according to the documentation checked September 15. Raw audio and full conversations are not saved to disk automatically. The continuity record is the one deliberate exception: it stores the last one or two user utterances (600 characters each), the open commitments, and the unconfirmed dispatches for the three most recent sessions, so an interrupted request is not silently lost. Action receipts persist in BB plugin storage and include the quoted request, task summary, target, and dispatch status; delegated briefs/messages also enter the target BB thread. Download conversation explicitly saves captions, lookup metadata, action receipts, and playback counters. Relevant thread content is sent to OpenAI for requested lookups.
+The plugin uses BB's authenticated HTTP/WebSocket routes. No additional public server or port share is required. Audio uses the browser AudioWorklet and mono PCM16 at 16 kHz. Sessions end after 20 minutes. Voice and backend usage are billed separately by OpenAI; check current pricing. Raw audio and full conversations are not saved to disk automatically. The continuity record is the one deliberate exception: it stores the last one or two user utterances (600 characters each), the open commitments, and the unconfirmed dispatches for the three most recent sessions, so an interrupted request is not silently lost. Action receipts persist in BB plugin storage and include the quoted request, task summary, target, and dispatch status; delegated briefs/messages also enter the target BB thread. Download conversation explicitly saves captions, lookup metadata, action receipts, and playback counters. Relevant thread content is sent to OpenAI for requested lookups.
 
 Sources: [GPT-Live](https://developers.openai.com/api/docs/guides/live), [delegation and tools](https://developers.openai.com/api/docs/guides/live-delegation), [images and vision](https://developers.openai.com/api/docs/guides/images-vision). The delegation guide states the Live audio frontend does not accept images directly: a Responses image input item is queued with `response.item.create`, then `response.create` runs or resumes the backend — which is exactly the order this implementation uses inside a pending tool batch. Checked September 15; no paid API call was made for this change.
-
-## Contributing
-
-Source: [ChaningJang/bb-plugin-talk-to-bb](https://github.com/ChaningJang/bb-plugin-talk-to-bb), MIT licensed. Issues and pull
-requests are welcome. Releases are `vX.Y.Z` tags and a tag is never moved; a fix ships as a new version.
