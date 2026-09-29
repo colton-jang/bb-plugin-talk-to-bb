@@ -190,7 +190,7 @@ async function main() {
   const reader = createReader({ cliPath: settings.cliPath, serverUrl, run: undefined });
   const manager = createManager({ cli, store: emptyStore, requests: { authorize() { throw new Error('bench: no writes'); } }, sessionId: 'bench', focus: async () => { throw new Error('bench'); } });
   // The user's notes, read once through the plugin's read-only list RPC, served from memory.
-  const listed = await fetch(`${serverUrl}/api/v1/plugins/talk-to-bb/rpc/thought`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'list', limit: 200 }) }).then(r => r.json());
+  const listed = await fetch(`${serverUrl}/api/v1/plugins/talk-to-bb/rpc/thought`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ op: 'list', limit: 200 }) }).then(r => r.json()).catch(() => ({})); // an older install has no thought RPC
   const notes = (listed.result ?? listed).thoughts ?? [];
   const noteStore = { list: async () => notes.map(n => `thought:${n.capturedAt}:${n.id}`), get: async k => notes.find(n => k.endsWith(`:${n.id}`)) ?? null };
   const execute = async (name, args) => {
