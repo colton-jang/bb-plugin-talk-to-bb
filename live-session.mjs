@@ -317,7 +317,8 @@ export class TalkSession extends EventEmitter {
         entry.done=true; this.continueBatch(batch,did);
       });
     }
-    if (e.type === 'response.completed' && e.response.id === batch.id) {
+    // response.incomplete (e.g. the output-token cap) ends the turn too; otherwise the wait never clears.
+    if ((e.type === 'response.completed' || e.type === 'response.incomplete') && e.response?.id === batch.id) {
       // A final answer (no tool calls) ends the thinking; with calls, the tools take over.
       if (!batch.calls.size) this.emit('lookup',{state:'done',name:'__backend__',id:`backend:${envelope.delegation_id}`});
       this.timer.completed(did,{usage:e.response.usage,hasCalls:batch.calls.size>0});

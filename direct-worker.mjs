@@ -213,14 +213,14 @@ export async function resolveWorkerTarget(cli, threadId) {
  * Builds the worker leg. The leg's own UserRequests authorizes its actions; `read` is the
  * read-only BB reader and `cli` the action CLI, both supplied by the server.
  */
-/** @param {{key:string,target:any,cli:Function,read:(name:string,args:any,signal?:AbortSignal)=>Promise<any>,store:any,timeZone?:string,onReceipt?:(receipt:any)=>void,onReturn:(args:any)=>any,Socket?:any,now?:()=>Date,backend?:{model?:string,reasoning?:string,serviceTier?:string}}} options */
-export function createWorkerLeg({ key, target, cli, read, store, timeZone = DEFAULT_TIME_ZONE, onReceipt = () => {}, onReturn, Socket, now, backend }) {
+/** @param {{key:string,target:any,cli:Function,read:(name:string,args:any,signal?:AbortSignal)=>Promise<any>,store:any,timeZone?:string,onReceipt?:(receipt:any)=>void,onReturn:(args:any)=>any,Socket?:any,now?:()=>Date,backend?:{model?:string,reasoning?:string,serviceTier?:string},inbox?:any}} options */
+export function createWorkerLeg({ key, target, cli, read, store, timeZone = DEFAULT_TIME_ZONE, onReceipt = () => {}, onReturn, Socket, now, backend, inbox }) {
   let act = null;
   const receipts = []; // newest state per receipt id, for the return handoff
   const sessionId = `worker-${Date.now()}-${randomUUID()}`;
   const leg = new WorkerSession({ key, target, timeZone, ...(Socket ? { Socket } : {}), ...(backend ? { backend } : {}),
     query: (name, args) => query(name, args) });
-  act = createManager({ cli, store, requests: leg.userRequests, sessionId, originThreadId: target.threadId, timeZone,
+  act = createManager({ cli, store, requests: leg.userRequests, sessionId, originThreadId: target.threadId, timeZone, ...(inbox ? { inbox } : {}),
     focus: async () => { throw new ActionError('A direct thread line cannot open threads in the browser.'); },
     onReceipt: receipt => {
       const at = receipts.findIndex(r => r.id === receipt.id);

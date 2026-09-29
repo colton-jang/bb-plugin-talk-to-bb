@@ -284,7 +284,8 @@ export default function plugin(bb: BbPluginApi) {
         const leg=createWorkerLeg({key:apiKey,target:pending.target,
           cli:createCli({cliPath:s.cliPath,serverUrl:bb.server.loopbackBaseUrl,timeout:60000}),
           read:(name:string,args:unknown,signal?:AbortSignal)=>query(name,args,signal),
-          store:bb.storage.kv,timeZone:s.timeZone||DEFAULT_TIME_ZONE,backend:backendOf(s),onReceipt:(receipt:any)=>{out('action',{receipt});book?.action(receipt);},onReturn});
+          store:bb.storage.kv,timeZone:s.timeZone||DEFAULT_TIME_ZONE,backend:backendOf(s),
+          inbox:createInbox({threadId:s.managerThreadId,cli:createCli({cliPath:s.cliPath,serverUrl:bb.server.loopbackBaseUrl,timeout:10000}),send:(args:any)=>bb.sdk.threads.send(args)}),onReceipt:(receipt:any)=>{out('action',{receipt});book?.action(receipt);},onReturn});
         leg.on('audio',(bytes:Uint8Array)=>{if(peer?.readyState===1)peer.send(bytes);});
         // No 'fault' forwarding: a failed worker leg returns to the manager instead of ending the panel.
         for(const type of ['ready','playback','flush']) leg.on(type,(value:object)=>out(type,value));
@@ -489,7 +490,7 @@ export default function plugin(bb: BbPluginApi) {
                 // The walk opener and in-call ledger rules ride along on every call, file or not.
                 // Short walk guidance as a voice append (the long context is already in the backend).
                 // Hey BB has its own opener below; the walk opener (check live threads first) would compete with it.
-                if(!closed&&session&&!['hey-bb','checkin'].includes(parsed.data.source??''))session.standing(sessionBriefing({continuation:Boolean(carried)}));
+                if(!closed&&session&&!['hey-bb','checkin'].includes(parsed.data.source??''))session.standing(sessionBriefing({continuation:Boolean(carried)||fromWorker}));
                 // Opened from an Ambient check-in the user said yes to: start on those items, not the previous call.
                 const ambientCtx=parsed.data.ambientId?spokenText.get(parsed.data.ambientId):undefined;
                 // A live check-in (2026-09-28): BB wakes up and says it itself, then asks; the user's yes or no is the
@@ -553,7 +554,7 @@ export default function plugin(bb: BbPluginApi) {
                 // Null when nothing is open: the call starts clean instead of opening on old words.
                 // Back from a direct thread line, the "previous session" is this same call's first leg: the manager
                 // still gets it as history, but the panel shows no last-session card mid-call.
-                const briefing=resumeBriefing({...previous,reviewRestored:Boolean(restored?.active)});
+                const briefing=resumeBriefing({...previous,reviewRestored:Boolean(restored?.active)},{midCall:fromWorker});
                 if(briefing&&session.resume(briefing)&&!fromWorker)
                   send('resume',{summary:{...resumeSummary(previous),reviewRestored:Boolean(restored?.active)}});
               } catch {/* a missing continuity record must never block a call */}
@@ -686,6 +687,13 @@ export default function plugin(bb: BbPluginApi) {
   bb.onDispose(()=>onWorkerEvent.dispose());
   // Awaited, not fire-and-forget: the host's dispatch waits for the receipt write.
   // Ambient Walk sees the same events after the live path; anything a live call already said is marked spoken.
-  for(const event of WORKER_EVENTS)bb.events.on(event as any,async(data:any)=>{const result=await onWorkerEvent(event,data);await ambient.observe(event,data,result).catch(()=>{});});
+  // An answer to something asked in the live call settles about 12 s later (worker-events.mjs). Ambient must see how
+  // it settled, or it re-announces an answer the call already spoke. Superseded or unsettled: a later event covers it.
+  for(const event of WORKER_EVENTS)bb.events.on(event as any,async(data:any)=>{
+    const result:any=await onWorkerEvent(event,data);
+    const observe=(r:any)=>ambient.observe(event,data,r).catch(()=>{});
+    if(result?.settling){void result.settling.then((settled:any)=>settled&&!settled.superseded&&!settled.unsettled?observe(settled):undefined);return;}
+    await observe(result);
+  });
   bb.onDispose(()=>{active?.close();});
 }
