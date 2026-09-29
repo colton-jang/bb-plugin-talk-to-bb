@@ -118,4 +118,7 @@ test('the model receives one strict compact tool and can decode only known opera
   assert.deepEqual(decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_projects',args:'{}'})}),
     {name:'bb_projects',args:{}});
   assert.throws(()=>decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_delete_everything',args:'{}'})}),/Unknown BB operation/);
+  // A lean phone call cannot name an operation its catalog dropped.
+  assert.throws(()=>decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_view_screen',args:'{}'})},'lean'),/Unknown BB operation/);
+  assert.equal(decodeToolCall({name:'bb_call',arguments:JSON.stringify({name:'bb_recall_thoughts',args:'{"query":null,"since":null,"limit":5}'})},'lean').name,'bb_recall_thoughts');
 });

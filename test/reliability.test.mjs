@@ -76,7 +76,7 @@ test('an uncertain spawn is reconciled by reading only, and never dispatched twi
   assert.equal(found.finding,'probably-created');
   assert.equal(found.candidates[0].id,'thr_found');
   assert.match(found.retry,/explicit go-ahead/);
-  // An approval waiting on the user is reported as his, in its own bucket, not as manager work.
+  // An approval waiting on the user is reported as the user's, in its own bucket, not as manager work.
   assert.deepEqual(outstanding.pendingInteractions.threads.map(t=>t.id),['thr_waiting']);
   assert.match(outstanding.pendingInteractions.note,/Only the user can answer these/);
   assert.match(outstanding.coverage,/Three separate things/);

@@ -23,6 +23,7 @@ export const actionSchemas={
     profile:z.enum(['general','simple','judgment','design','audit','review','probe']),isolatedWorktree:z.boolean(),attachSnapshotId:snapshotId,request}).strict(),
   bb_tell_thread:z.object({threadId,message:z.string().trim().min(5).max(16000),mode:z.enum(['steer','queue']),attachSnapshotId:snapshotId,request}).strict(),
   bb_stop_thread:z.object({threadId,request}).strict(),
+  bb_talk_to_worker:z.object({threadId,request}).strict(),
 };
 const descriptions={
   bb_execution_options:'Read project sources and ready environments before spawning. Prefer an always-on machine for normal work, and the machine that holds the files for work bound to one. The result lists supported task profiles. Choose the project for the task, not automatically the currently viewed project.',
@@ -35,6 +36,7 @@ const descriptions={
   bb_spawn_thread:'Start an agent for an explicit user request. First check for an existing thread that should receive a follow-up instead, and check bb_find_capability for a project skill that already covers the task. Do a single small lookup yourself. If that capability is present-not-indexed, put its exact relative path in the brief; the worker is not offered it as a skill and should not be expected to find it unaided. Read execution options and use a matching environment/project. Keep the user’s scope and constraints in a complete brief. Use general or simple for routine work, judgment for planning, architecture, debugging, verification, or legal, financial, and security judgment, design for core visual design and interface implementation, audit or review for those named tasks, and probe only for throwaway tests. isolatedWorktree=true for code intended for commit. Set attachSnapshotId to a bb_view_screen snapshot id to hand the agent that actual image; null otherwise. Returns a durable receipt; started is not finished. Do not automatically retry uncertain delivery.',
   bb_tell_thread:'Relay an explicit instruction, correction, or decision to an existing agent. Read the thread first. Preserve what the user asked to change AND leave alone. Steer for immediate course corrections; queue for non-urgent follow-up. Set attachSnapshotId to a bb_view_screen snapshot id to hand the agent that actual image; null otherwise. A queued receipt means it has not been delivered yet. Do not automatically retry uncertain delivery.',
   bb_stop_thread:'Stop a particular agent only when the user explicitly asks to stop it, including "stop", "wait" or "cancel" said about an agent you just announced starting. Stopping keeps its partial work. Stopping voice or saying Quiet does not stop agents.',
+  bb_talk_to_worker:'Hand the user over to a direct voice line with ONE existing worker thread, in a different voice (direct-worker.mjs). Use only when the user asks to talk directly to a thread or its agent ("let me talk to the Pocket thread", "put me through to that agent"). Search and resolve the thread first. This ends your part of the call: say one short line that you are handing them over and that "take me back to the manager" returns them. Not for relaying a single instruction; use bb_tell_thread for that.',
 };
 export const actionDefinitions=Object.entries(actionSchemas).map(([name,schema])=>({type:'function',name,description:descriptions[name],strict:true,parameters:z.toJSONSchema(schema)}));
 export const profiles={
@@ -177,8 +179,10 @@ export async function reconcileReceipt(cli,receipt){
 export const SURFACE_LABELS={browser:'browser tab',window:'window',monitor:'screen',unknown:'shared surface'};
 const noScreen={capture:async()=>{throw new ActionError('Screen sharing is not available in this session.');},attach:async()=>{throw new ActionError('Screen sharing is not available in this session.');}};
 
-/** @param {{cli:Function,store:any,requests:UserRequests,sessionId:string,focus:Function,screen?:{capture:Function,attach:Function},onReceipt?:(receipt:any)=>void,originThreadId?:string|null,timeZone?:string,now?:()=>Date,inbox?:{threadId:string|null,deliver:(text:string)=>Promise<any>}}} options */
-export function createManager({cli,store,requests,sessionId,focus,screen=noScreen,onReceipt=()=>{},originThreadId=null,timeZone=DEFAULT_TIME_ZONE,now=()=>new Date(),inbox=disabledInbox}){
+const noWorkerLine=async()=>{throw new ActionError('A direct thread voice line is not available in this session.');};
+
+/** @param {{cli:Function,store:any,requests:UserRequests,sessionId:string,focus:Function,screen?:{capture:Function,attach:Function},onReceipt?:(receipt:any)=>void,originThreadId?:string|null,timeZone?:string,now?:()=>Date,talkToWorker?:Function,inbox?:{threadId:string|null,deliver:(text:string)=>Promise<any>}}} options */
+export function createManager({cli,store,requests,sessionId,focus,screen=noScreen,onReceipt=()=>{},originThreadId=null,timeZone=DEFAULT_TIME_ZONE,now=()=>new Date(),talkToWorker=noWorkerLine,inbox=disabledInbox}){
   const running=new Map();
   // Dispatches whose failure goes to the manager thread. Focus and screen failures are local to the call.
   const REPORTED=['bb_spawn_thread','bb_tell_thread','bb_stop_thread'];
@@ -208,7 +212,7 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
       return { time:timeContext(now(),timeZone),
         pendingInteractions:waiting===null
           ? {error:'BB could not be read for pending interactions just now; say so rather than implying there are none.'}
-          : {threads:waiting,note:'BB approvals and inputs waiting on the user. Only the user can answer these; you have no tool for it and a queued message does not clear one. Report them as his, separately from what you recorded.'},
+          : {threads:waiting,note:'BB approvals and inputs waiting on the user. Only the user can answer these; you have no tool for it and a queued message does not clear one. Report them as the user\u2019s, separately from what you recorded.'},
         commitments:receipts.filter(r=>r.kind==='bb_note_commitment'&&r.status==='open')
           .map(r=>({id:r.id,text:r.summary,dueDate:r.dueDate??null,recordedAt:r.at,request:r.request})),
         unconfirmedDispatches:await Promise.all(unconfirmed.map(r=>reconcileReceipt(cli,r))),
@@ -223,6 +227,14 @@ export function createManager({cli,store,requests,sessionId,focus,screen=noScree
         environments:envs.filter(e=>e.projectId===args.projectId&&e.status==='ready').map(e=>({id:e.id,hostId:e.hostId,hostName:machines.find(m=>m.id===e.hostId)?.name,hostStatus:machines.find(m=>m.id===e.hostId)?.status,path:e.path,isWorktree:e.isWorktree})),profiles};
     }
     const authorization=requests.authorize(args.request);
+    if(name==='bb_talk_to_worker'){
+      // Not a BB mutation, so no dispatch receipt: the switch itself is visible in the panel.
+      const t=await thread(args.threadId);
+      if(t.archivedAt)throw new ActionError('That thread is archived, so it cannot take instructions. Choose an active thread.');
+      // The whole live utterance travels with the switch, so an instruction said in the same breath is not lost.
+      const heard=requests.parts.find(p=>p.id===authorization.turn)?.text??args.request;
+      return talkToWorker({threadId:t.id,title:t.title||t.titleFallback||t.id,projectId:t.projectId??null,status:t.runtime?.displayStatus??t.status??null},{request:args.request,heard});
+    }
     if(name==='bb_note_commitment'){
       const at=now().toISOString();
       const receipt={key:`action:${sessionId}:${createHash('sha256').update(`${sessionId}|commitment|${authorization.turn}|${normalizeRequest(args.text)}`).digest('hex').slice(0,24)}`,

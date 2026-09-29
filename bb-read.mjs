@@ -12,14 +12,15 @@ export const schemas = {
   bb_overview: z.object({}).strict(),
   bb_search: z.object({ query: z.string().trim().min(1).max(160) }).strict(),
   bb_threads: z.object({ projectId: project.default(null), status: z.enum(['all', 'active', 'idle', 'error', 'waiting']).default('all'), offset: z.number().int().min(0).max(10000).default(0) }).strict(),
-  bb_read_thread: z.object({ threadId: id, turns: z.number().int().min(1).max(12).default(5) }).strict(),
+  bb_read_thread: z.object({ threadId: id, turns: z.number().int().min(1).max(12).default(5),
+    olderBy: z.number().int().min(0).max(400000).default(0).describe('0 for the newest part. To read further back, pass the nextOlderBy value a previous read of this thread returned.') }).strict(),
   bb_projects: z.object({}).strict(),
 };
 const descriptions = {
-  bb_overview: 'Read live BB counts, projects, and up to 20 current threads across ALL projects. Running and pending-interaction threads first. Idle does not mean finished. Use bb_read_thread for facts about work or blockers.',
+  bb_overview: 'Read live BB counts, projects, and the top current threads (up to 60, or 25 in lean mode) across ALL projects; page through the rest with bb_threads. Running and pending-interaction threads first. Idle does not mean finished. Use bb_read_thread for facts about work or blockers.',
   bb_search: 'Search titles and conversation messages across BB, including archived threads. Returns matching snippets and IDs. Search is bounded; read matching threads before explaining their decisions.',
   bb_threads: 'Page through current, unarchived visible threads, optionally filtered by project or state. Waiting means a pending BB interaction, not all work that may need user judgment. Page size 40.',
-  bb_read_thread: 'Read current metadata, pending interactions, queued messages, and the latest conversation turns for one thread. Explicitly reports omitted older history. Read multiple threads when comparing work.',
+  bb_read_thread: 'Read current metadata, pending interactions, queued messages, and the latest conversation turns for one thread. Returns the newest part first and says when older history was left out; only when the question needs earlier history, read again with olderBy set to the nextOlderBy it returned. Read multiple threads when comparing work.',
   bb_projects: 'List BB projects and their names.',
 };
 export const toolDefinitions = [
@@ -80,7 +81,15 @@ export function createCli({ cliPath, serverUrl, run = exec, signal, timeout = 20
     return json ? JSON.parse(stdout) : stdout;
   };
 }
+// How much a read hands back to the voice backend. Everything returned stays in the backend's memory for
+// the rest of the call (GPT-Live offers no way to trim it), so 'lean' keeps a long walk fast and cheap:
+// a 2026-09-28 walk reached 347k tokens per lookup after a dozen full-size thread reads.
+export const READ_BUDGETS = Object.freeze({
+  full: { conversation: 24000, interactions: 7000, queue: 5000, overviewThreads: 60, matches: 3, matchChars: 1600 },
+  lean: { conversation: 5000, interactions: 2000, queue: 1200, overviewThreads: 25, matches: 2, matchChars: 500 },
+});
 export function createReader(options) {
+  const budget = READ_BUDGETS[options?.budget] ?? READ_BUDGETS.full;
   const cli = createCli(options);
   const capabilities = createCapabilities({ cli });
   const projects = async () => {
@@ -109,8 +118,9 @@ export function createReader(options) {
         cli(['thread','count','--by','project','--json']), projects(), cli(['thread','list','--json']),
       ]);
       const rows = currentThreads(listed);
-      data = { counts, projects: names, threads: rows.slice(0,20).map(threadSummary),
-        returned: Math.min(rows.length,20), more: rows.length > 20,
+      const cap = budget.overviewThreads;
+      data = { counts, projects: names, threads: rows.slice(0,cap).map(threadSummary),
+        returned: Math.min(rows.length,cap), more: rows.length > cap,
         coverage: 'Current visible threads across all projects. Counts come from BB count. Listing may be bounded; use project filtering and search for missing work.' };
     }
     if (name === 'bb_threads') {
@@ -128,21 +138,31 @@ export function createReader(options) {
       const found = await cli(['thread','search',args.query,'--limit','8','--json']);
       data = Object.fromEntries(Object.entries(found).map(([group, result]) => [group, {
         total: result.total, results: (result.results || []).map(r => ({ thread: threadSummary(r.thread),
-          matches: (r.matches || []).slice(0,3).map(m => ({ sourceKind:m.sourceKind, text:m.text?.slice(0,800), sourceSeq:m.sourceSeq })) })),
+          matches: (r.matches || []).slice(0,budget.matches).map(m => ({ sourceKind:m.sourceKind, text:m.text?.slice(0,budget.matchChars), sourceSeq:m.sourceSeq })) })),
       }]));
     }
     if (name === 'bb_read_thread') {
+      const olderBy = args.olderBy ?? 0;
       const [state, conversation, interactions, queue] = await Promise.all([
         cli(['thread','show',args.threadId,'--json']),
-        cli(['thread','log',args.threadId,'--format','minimal','--limit',String(args.turns)],false),
+        // Paging back needs history beyond the newest turns, so a later page reads a longer log.
+        cli(['thread','log',args.threadId,'--format','minimal','--limit',String(olderBy ? Math.max(args.turns, 40) : args.turns)],false),
         cli(['thread','interactions','list',args.threadId,'--json']),
         cli(['thread','queue','list',args.threadId,'--json']),
       ]);
       // Prefer recent content if a single large turn exceeds the context budget.
       data = { thread: threadSummary(state.thread), pendingTodos: state.pendingTodos,
-        conversation: conversation.slice(-10000), conversationTruncated: conversation.length > 10000,
-        coverage: `Newest ${args.turns} user-message turns only; not complete history.`,
-        interactions: short(interactions,3000), queue: short(queue,2000) };
+        ...(() => {
+          const end = Math.max(0, conversation.length - olderBy), start = Math.max(0, end - budget.conversation);
+          const more = start > 0;
+          return { conversation: conversation.slice(start, end), conversationTruncated: more,
+            ...(more ? { nextOlderBy: conversation.length - start } : {}),
+            coverage: olderBy
+              ? `An older part of this thread (skipping the newest ${olderBy} characters)${more ? '; still older history exists: pass nextOlderBy to keep going' : '; this reaches the start of what the log returned'}.`
+              : more ? `Newest part of the last ${args.turns} turns only; older history exists: read again with olderBy = nextOlderBy if the question needs it.`
+              : `Newest ${args.turns} user-message turns only; not complete history.` };
+        })(),
+        interactions: short(interactions,budget.interactions), queue: short(queue,budget.queue) };
     }
     return { checkedAt: new Date().toISOString(), source: 'BB CLI', ...data };
   };

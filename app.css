@@ -35,3 +35,26 @@
 .ttbb-notice{margin:0;padding:6px 10px;border-radius:6px;background:var(--bb-surface-2,rgba(255,255,255,.06));font-size:12px;line-height:1.4}
 .ttbb-carry-body{display:flex;flex-direction:column;gap:4px;padding:6px 10px;font-size:12px;line-height:1.45}
 .ttbb-carry-body p{margin:0}
+/* Direct-worker voice mode: the banner and the thread's captions are set apart from the manager's. */
+.ttbb-worker-banner{margin:0 18px 6px;padding:7px 9px;border:1px solid var(--primary,var(--border));border-radius:7px;font-size:11px;line-height:1.5}
+.ttbb-caption.worker>span{color:var(--primary,var(--muted-foreground))}
+
+/* Created: 2026-09-28. The Notebook view: past conversations and notes, in the call view's type and spacing. */
+.ttbb-header-actions{display:flex;align-items:center;gap:4px}.ttbb-header-actions>button:last-child{border:0;font-size:23px;padding:0 9px}
+.ttbb-panel .ttbb-book-toggle{font-size:12px;padding:4px 9px}
+.ttbb-book{display:flex;flex-direction:column;min-height:0;flex:1}
+.ttbb-book-tabs{display:flex;gap:6px;padding:0 18px 10px}.ttbb-panel .ttbb-book-tabs .is-on{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary)}
+.ttbb-panel .ttbb-book-refresh{margin-left:auto;border:0;background:transparent;font-size:11px;color:var(--muted-foreground)}
+.ttbb-book-error{margin:0 18px 8px}
+.ttbb-book-list{overflow:auto;padding:0 18px 12px;max-height:62dvh;overscroll-behavior:contain}
+.ttbb-book-list h3{margin:12px 0 6px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.07em;color:var(--muted-foreground)}
+.ttbb-book-session{border-bottom:1px solid var(--border);padding:7px 0}.ttbb-book-session summary{cursor:pointer;display:flex;flex-direction:column;gap:2px;list-style:none}
+.ttbb-book-session summary::-webkit-details-marker{display:none}
+.ttbb-book-meta{font-size:11px;color:var(--muted-foreground)}.ttbb-book-preview{line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ttbb-book-session[open] .ttbb-book-preview{white-space:normal}
+.ttbb-book-body{padding-top:8px}.ttbb-speaker-link{all:unset;cursor:pointer;color:inherit;text-decoration:underline;text-underline-offset:2px}.ttbb-speaker-link:focus-visible{outline:2px solid var(--ring,currentColor);outline-offset:2px}.ttbb-book-body .ttbb-sources{margin:8px 0}.ttbb-book-body .ttbb-sources>div{max-height:none}
+.ttbb-book-thought{border-bottom:1px solid var(--border);padding:7px 0}.ttbb-book-thought p{margin:0 0 4px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.ttbb-book-thought>div{display:flex;align-items:center;justify-content:space-between;gap:8px}.ttbb-book-thought small{color:var(--muted-foreground);font-size:10px}
+.ttbb-panel .ttbb-book-thought button{padding:2px 8px;font-size:11px}
+.ttbb-book-confirm{display:flex;align-items:center;gap:6px;font-size:11px}
+.ttbb-panel .ttbb-book-danger{background:var(--destructive,#c0392b);color:var(--destructive-foreground,#fff);border-color:var(--destructive,#c0392b)}
